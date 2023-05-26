@@ -38,10 +38,12 @@ DOSKEY gad=git add $*
 DOSKEY gds=git diff --staged
 DOSKEY gus=git restore --staged *
 DOSKEY gap=git add -p
+DOSKEY gup=git restore --staged -p
 
 :: NPM Run
 DOSKEY npmd=npm run dev 
 DOSKEY npmb=npm run build
+DOSKEY npms=npm run start
 
 :: Common directories
 
