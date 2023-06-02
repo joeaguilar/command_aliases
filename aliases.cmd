@@ -13,8 +13,8 @@ DOSKEY add_python33=set PATH=%PATH%;"C:\Python33\"
 
 :: Reload this file
 DOSKEY .s= %USERPROFILE%\Programming\command_aliases\aliases.cmd
-
 :: Movement
+
 
 DOSKEY ..=cd ../
 DOSKEY ...=cd ../../
@@ -27,7 +27,7 @@ DOSKEY gopro=cd %USERPROFILE%\Programming\
 
 DOSKEY ls=dir \B $*
 DOSKEY ll=dir $*
-DOSKEY sublime=sublime_text $*  
+DOSKEY sublime=sublime_text $*
     ::sublime_text.exe is name of the executable. By adding a temporary entry to system path, we don't have to write the whole directory anymore.
 DOSKEY gsp="C:\Program Files (x86)\Sketchpad5\GSP505en.exe"
 DOSKEY alias=notepad %USERPROFILE%\Dropbox\alias.cmd
@@ -41,7 +41,7 @@ DOSKEY gap=git add -p
 DOSKEY gup=git restore --staged -p
 
 :: NPM Run
-DOSKEY npmd=npm run dev 
+DOSKEY npmd=npm run dev
 DOSKEY npmb=npm run build
 DOSKEY npms=npm run start
 
