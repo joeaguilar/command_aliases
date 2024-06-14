@@ -34,7 +34,7 @@ alias ld='ls -dAlTF'
 alias lt='ls -hAlTFrt'
 alias lr='ls -hAlTFr'
 
-alias path='echo -e ${PATH//:/\\n}'
+alias mypath='echo -e ${PATH//:/\\n}'
 alias tree='tree -I ".git|node_modules"'
 alias free="free -mt"
 alias df="df -Tha --total"

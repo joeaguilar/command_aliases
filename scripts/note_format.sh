@@ -15,6 +15,7 @@ function repeat () {
     done;
     echo $TEXT;
 }
+
 function getDate() {
     local today=$(date)
     local setDate=${1:-$today}
@@ -23,24 +24,97 @@ function getDate() {
     echo $(date --date="$setDate" "+$NOTE_FORMAT" )
 }
 
-NOW=$(getDate "next wed")
-
 function generateNoteTemplate() {
 
-NOTE="/*"
-NOTE+=repeat 30 "="
-NOTE+="\n"
-NOTE+=repeat 30 "-"
-NOTE+="\n"
-NOTE+=$date
-NOTE+="\n"
-NOTE+=repeat 30 "-"
-NOTE+="\n"
-NOTE+=repeat 30 "="
-NOTE+="\n"
-NOTE+="*/"
+    local date=$(getDate $1)
+    local newLine="* "
+
+    NOTE="/*"
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "=")
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "-")
+    NOTE+="\n"$newLine
+    NOTE+="  "$date
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "-")
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "=")
+    NOTE+="\n"$newLine
+    NOTE+="*/"
+
+    echo -e "$NOTE"
 
 }
+
+# A more generic version
+# This could be useful. Leaving here, it has nowhere else to live
+function generateTemplate() {
+
+    local textToWrap=$1
+    local newLine="* "
+
+    NOTE="/*"
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "=")
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "-")
+    NOTE+="\n"$newLine
+    NOTE+="  "${1:- }
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "-")
+    NOTE+="\n"$newLine
+    NOTE+=$(repeat 30 "=")
+    # NOTE+="\n"$newLine
+    NOTE+="\n*/\n\n\n "
+
+echo -e "$NOTE"
+
+}
+
+# we should go with this next time
+function generateHeadingBruteForce() {
+    echo -e "/*"
+    echo -e "* ============================="
+    echo -e "* -----------------------------"
+    echo -e "  $1"
+    echo -e "* -----------------------------"
+    echo -e "* ============================="
+    echo -e "*/\n\n"
+}
+
+function generateNoteTemplateForAWeek() {
+    local start_date=$1
+    local noteText=""
+
+    for i in {0..6};
+    do
+        date=$(getDate "${start_date}+${i}day");
+        noteText+=$(generateTemplate "$date");
+    done
+
+    echo "$noteText"
+}
+
+function startDateAtMonday() {
+    local start_date=${1:-now}
+    local dayOfTheWeek=$(date --date="$start_date" +%u)
+    local beginningOfTheWeekOffset=$[ $dayOfTheWeek - 1]
+    echo $(date --date="$start_date -${beginningOfTheWeekOffset} days" "+$NOTE_FORMAT")
+}
+
+function run () {
+    if [ -z "$2" ]; then
+       generateNoteTemplateForAWeek $1
+    else
+       generateNoteTemplateForAWeek "$(startDateAtMonday $1)";
+    fi
+}
+
+
+run $1 $2
+
+
 
 
 
