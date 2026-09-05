@@ -42,8 +42,8 @@ alias gbn='git branch --no-merged'
 
 #git advanced - watching unwatching files
 alias gitskiplist='git ls-files -v|grep "^S"'
-gitskip() {git update-index --skip-worktree "$@"; git ls-files -v|grep '^S'; }
-gitskip() {git update-index --no-skip-worktree "$@"; git ls-files -v|grep '^S'; }
+gitskip() { git update-index --skip-worktree "$@"; git ls-files -v|grep '^S'; }
+gitunskip() { git update-index --no-skip-worktree "$@"; git ls-files -v|grep '^S'; }
 
 
 #traversal
@@ -68,7 +68,7 @@ function installM1Node() {
 function setNodeVersion() {
     NODE_VERSION=$(node -v);
     echo "Setting node globals to " $NODE_VERSION;
-    export PATH=$PATH:~/.nodenv/versions/"$NODE_VERSION"/lib/node_modules"
+    export PATH=$PATH:~/.nodenv/versions/"$NODE_VERSION"/lib/node_modules
 }
 
 
