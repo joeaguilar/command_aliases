@@ -1,4 +1,4 @@
-# PowerShell profile (PowerShell 5.1)
+﻿# PowerShell profile (PowerShell 5.1)
 # Converted from command_aliases\aliases.cmd and command_aliases\bash_profile.sh
 # Reload with:  rel
 
@@ -25,6 +25,10 @@ function rel {
 $env:EDITOR = "code"
 # PowerShell sets no HOME, so ccq cannot find ~/.claude/projects on its own
 $env:CCQ_ROOT = "$env:USERPROFILE\.claude\projects"
+# Prefer the official SQLite CLI (fts5 + .recover) over the vendor copies that
+# come earlier on PATH (Android SDK, Nsight). Cheap check, no probing at startup.
+$__sqliteOfficial = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\SQLite.SQLite*\sqlite3.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($__sqliteOfficial) { Set-Alias sqlite3 $__sqliteOfficial.FullName }
 
 # --- Movement -----------------------------------------------------------------
 function ..     { Set-Location .. }
@@ -128,6 +132,36 @@ function work {
     Start-Process wt -ArgumentList "-d `"$dir`" powershell -NoLogo -NoExit -Command claude `; split-pane -V -d `"$dir`""
 }
 
+# fo: fuzzy-pick a project, then a file inside it, then a program to open it with
+function fo {
+    # stage 1: directory (same as work/gopro)
+    $root = "$env:USERPROFILE\AI\AI_projects"
+    $pick = Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name |
+        fzf --prompt 'dir> ' --preview "dir /b `"$root\{}`""
+    if (-not $pick) { return }
+    $dir = Join-Path $root $pick
+
+    # stage 2: file (rg --files honours .gitignore, so node_modules/.git stay out;
+    #          fall back to Get-ChildItem when rg isn't installed)
+    $files = if (Get-Command rg -ErrorAction SilentlyContinue) { rg --files $dir }
+             else { Get-ChildItem $dir -File -Recurse | Select-Object -ExpandProperty FullName }
+    $file = $files | ForEach-Object { $_.Substring($dir.Length + 1) } |
+        fzf --prompt 'file> ' --preview "type `"$dir\{}`""
+    if (-not $file) { return }
+    $path = Join-Path $dir $file
+
+    # stage 3: program.  Label -> scriptblock; $args[0] is the file path
+    $apps = [ordered]@{
+        'code'     = { code $args[0] }
+        'notepad'  = { notepad $args[0] }
+        'nvim'     = { nvim $args[0] }
+        'explorer' = { explorer.exe /select,$args[0] }
+        'default'  = { Start-Process $args[0] }   # whatever Windows associates
+    }
+    $app = $apps.Keys | fzf --prompt 'open with> ' --header $file
+    if ($app) { & $apps[$app] $path }
+}
+
 # ccr: fuzzy-pick a past Claude Code session and resume it
 #      default = sessions for the current project;  ccr -All = every project
 function ccr([switch]$All) {
@@ -187,6 +221,125 @@ function kpi {
 
 # kimpact <symbol>: transitive blast radius of changing a symbol
 # function kimpact { kgr impact --no-progress @args 2>$null }
+
+# --- itr repair -----------------------------------------------------------------
+# Find-Sqlite3: pick the most capable sqlite3.exe on this machine. Vendor copies
+#   (Android SDK, Nsight, Apache) lack fts5 and .recover; the official build from
+#   `winget install SQLite.SQLite` has both. Result is cached for the session.
+function Find-Sqlite3([switch]$Refresh) {
+    if ($global:__sqlite3 -and -not $Refresh -and (Test-Path $global:__sqlite3.Path)) { return $global:__sqlite3 }
+    $cands = @(where.exe sqlite3 2>$null) +
+             @(Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\SQLite.SQLite*" -Recurse -Filter sqlite3.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName) |
+             Where-Object { $_ } | Select-Object -Unique
+    $found = foreach ($exe in $cands) {
+        # -batch and "< nul" so a probe can never sit waiting for interactive input
+        $ver  = ((cmd /c "`"$exe`" -version < nul 2>&1") -split ' ')[0]
+        $fts5 = ((cmd /c "`"$exe`" -batch :memory: `"CREATE VIRTUAL TABLE t USING fts5(x); SELECT 'yes';`" < nul 2>&1") -join '') -eq 'yes'
+        $rec  = ((cmd /c "`"$exe`" -batch :memory: .recover < nul 2>&1") -join '') -notmatch 'unknown command'
+        [pscustomobject]@{ Path = $exe; Version = [version]$ver; Fts5 = $fts5; Recover = $rec }
+    }
+    $global:__sqlite3 = $found | Sort-Object Recover, Fts5, Version -Descending | Select-Object -First 1
+    $global:__sqlite3
+}
+
+# itrfix [-Apply]: diagnose a corrupt .itr.db and pick the best restore source.
+#   Candidates: git HEAD, git origin/main (after fetch), and a salvage rebuild of
+#   whatever sqlite3 can still read (.recover when available, else .dump).
+#   Dry run by default; -Apply replaces the db, then runs itr reindex + itr doctor.
+#   The corrupt file is always backed up first.
+function itrfix([switch]$Apply, [string]$Db = '.itr.db') {
+    if (-not (Test-Path $Db)) { Write-Warning "no $Db here"; return }
+    $sq = Find-Sqlite3
+    if (-not $sq) { Write-Warning 'no sqlite3.exe found; winget install SQLite.SQLite'; return }
+    "sqlite3: $($sq.Path) (v$($sq.Version), fts5=$($sq.Fts5), recover=$($sq.Recover))"
+    $Db    = (Resolve-Path $Db).Path
+    $dir   = Split-Path $Db
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $tmp   = Join-Path $env:TEMP "itrfix-$stamp"
+    New-Item -ItemType Directory $tmp | Out-Null
+
+    function probe($path, $name) {
+        $ok = (& $sq.Path -batch $path 'PRAGMA integrity_check;' 2>&1 | Select-Object -First 1) -eq 'ok'
+        $m  = & $sq.Path -batch $path "SELECT COUNT(*)||'|'||IFNULL(MAX(updated_at),'')||'|'||(SELECT IFNULL(MAX(created_at),'') FROM events) FROM issues;" 2>$null
+        $p  = "$m".Split('|') + @('', '', '')
+        [pscustomobject]@{ Source = $name; Healthy = $ok; Issues = $p[0]; LastIssueUpdate = $p[1]; LastEvent = $p[2]; Path = $path }
+    }
+
+    $current = probe $Db 'current'
+    if ($current.Healthy) { "integrity ok, nothing to repair"; itr doctor; return }
+    Write-Host "integrity check FAILED on $Db" -ForegroundColor Yellow
+    $backup = "$Db.corrupt-$stamp"
+    Copy-Item $Db $backup
+    "backup: $backup"
+
+    $cands = @()
+    # 1. committed copies from git
+    $rel = git -C $dir ls-files --full-name (Split-Path -Leaf $Db) 2>$null
+    if ($rel) {
+        git -C $dir fetch -q 2>$null
+        foreach ($ref in 'HEAD', 'origin/main') {
+            if (-not (git -C $dir rev-parse -q --verify "${ref}:$rel" 2>$null)) { continue }
+            $out = Join-Path $tmp ("git-" + ($ref -replace '[/:]', '_') + ".db")
+            Start-Process git -ArgumentList @('-C', "`"$dir`"", 'cat-file', '-p', "${ref}:$rel") -RedirectStandardOutput $out -NoNewWindow -Wait
+            $cands += probe $out "git $ref"
+        }
+    }
+    # 2. salvage: .recover walks the raw pages and rescues orphaned rows into
+    #    lost_and_found; .dump is the fallback. Either way drop the FTS index and
+    #    the transaction wrapper, and load with INSERT OR IGNORE to skip bad rows.
+    $dump = Join-Path $tmp 'dump.sql'
+    $mode = if ($sq.Recover) { '.recover' } else { '.dump' }
+    Start-Process $sq.Path -ArgumentList @('-batch', "`"$Db`"", $mode) -RedirectStandardOutput $dump -NoNewWindow -Wait
+    "salvage via $mode"
+    $skipUntil = $null   # regex that ends the FTS statement currently being skipped
+    $clean = foreach ($line in [IO.File]::ReadAllLines($dump)) {
+        if ($skipUntil) { if ($line -match $skipUntil) { $skipUntil = $null }; continue }
+        if ($line -match '_fts') {
+            if ($line -match '\bBEGIN\s*$')                { $skipUntil = '^END;' }   # FTS trigger body
+            elseif (-not $line.TrimEnd().EndsWith(';'))    { $skipUntil = ';\s*$' }  # multi-line statement
+            continue
+        }
+        # .dump wraps in BEGIN TRANSACTION/COMMIT (or ROLLBACK on error), .recover in BEGIN/COMMIT;
+        # a trigger body's bare BEGIN has no semicolon and must be kept
+        if ($line -match '^(BEGIN( TRANSACTION)?|COMMIT|ROLLBACK)\s*;') { continue }
+        $line -replace '^INSERT INTO', 'INSERT OR IGNORE INTO'
+    }
+    $cleanSql = Join-Path $tmp 'dump.clean.sql'
+    [IO.File]::WriteAllLines($cleanSql, $clean, (New-Object Text.UTF8Encoding $false))
+    $salv = Join-Path $tmp 'salvage.db'
+    & $sq.Path -batch $salv ".read $($cleanSql -replace '\\', '/')" 2>$null | Out-Null
+    # .recover keeps whatever it can decode, junk cells included; drop rows whose
+    # column types contradict the declared schema so itr can open the result
+    foreach ($tbl in 'issues', 'notes', 'events', 'dependencies', 'relations') {
+        $preds = foreach ($c in @(& $sq.Path -batch $salv "PRAGMA table_info($tbl);" 2>$null)) {
+            $f = $c.Split('|'); $name = $f[1]; $type = $f[2].ToUpper()
+            if     ($type -match 'INT')       { "typeof(`"$name`") NOT IN ('integer','null')" }
+            elseif ($type -match 'TEXT|CHAR') { "typeof(`"$name`") NOT IN ('text','null')" }
+        }
+        if ($preds) { & $sq.Path -batch $salv "DELETE FROM $tbl WHERE $($preds -join ' OR ');" 2>$null | Out-Null }
+    }
+    itr reindex --db $salv -q 2>$null | Out-Null
+    $cands += probe $salv 'salvage'
+
+    $all = @($current) + $cands
+    $all | Format-Table Source, Healthy, Issues, LastIssueUpdate, LastEvent -AutoSize | Out-String | Write-Host
+    $best = $cands | Where-Object Healthy | Sort-Object LastEvent, Issues -Descending | Select-Object -First 1
+    if (-not $best) { Write-Warning 'no healthy candidate found; salvage output left in ' + $tmp; return }
+    "best source: $($best.Source)"
+
+    # anything readable in the wreck that the chosen source lacks?
+    $salvPath = ($cands | Where-Object Source -eq 'salvage').Path
+    if ($best.Source -ne 'salvage' -and (Test-Path $salvPath)) {
+        $newer = & $sq.Path -batch $salvPath "ATTACH '$($best.Path -replace '\\', '/')' AS b; SELECT w.id FROM main.issues w LEFT JOIN b.issues x ON x.id = w.id WHERE x.id IS NULL OR w.updated_at > x.updated_at;" 2>$null
+        if ($newer) { Write-Warning ("issues in the corrupt copy missing/newer than $($best.Source): " + ($newer -join ', ') + "  (salvage db: $salvPath)") }
+    }
+
+    if (-not $Apply) { "dry run: re-run with -Apply to restore from $($best.Source)"; return }
+    Copy-Item $best.Path $Db -Force
+    "restored $Db from $($best.Source)"
+    itr reindex
+    itr doctor
+}
 
 # --- Shell utilities ------------------------------------------------------------
 # renv: reload PATH from the registry (no shell restart after winget installs)
