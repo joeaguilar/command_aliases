@@ -52,6 +52,22 @@ alias ...='cd ../../'
 alias ....='cd ../../../'
 alias .....='cd ../../../../'
 
+# fcd: walk directories in fzf. Pick a folder to descend, '..' to go up,
+#      '.' to cd into the shown path. Esc aborts and leaves you where you were.
+fcd() {
+  local cur=$PWD pick
+  while :; do
+    pick=$( { echo .; [[ $cur != / ]] && echo ..
+              find "$cur" -mindepth 1 -maxdepth 1 -type d | sed 's|.*/||' | sort; } |
+            fzf --prompt 'cd> ' --header "$cur" --no-sort --preview "ls -A '$cur'/{}" ) || return
+    case $pick in
+      .)  cd "$cur" && return ;;
+      ..) cur=$(dirname "$cur") ;;
+      *)  cur="${cur%/}/$pick" ;;
+    esac
+  done
+}
+
 
 
 #install node on M1 mac
