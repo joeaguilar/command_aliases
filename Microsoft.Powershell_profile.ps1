@@ -132,6 +132,52 @@ function work {
     Start-Process wt -ArgumentList "-d `"$dir`" powershell -NoLogo -NoExit -Command claude `; split-pane -V -d `"$dir`""
 }
 
+# Get-OpenWith <path>: programs Windows lists under "Open with" for the file's
+#   extension (HKCU FileExts + HKCR OpenWithList/OpenWithProgids + default handler),
+#   resolved to Exe + Args where %1 stands for the file.  Store apps (AppX) are
+#   skipped: they have no command line.  Dedupes by exe name, drops dead paths.
+function Get-OpenWith([string]$Path) {
+    $ext = [IO.Path]::GetExtension($Path)
+    if (-not $ext) { return }
+    $cr = 'Registry::HKEY_CLASSES_ROOT'
+    $fx = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$ext"
+    $exes = @(); $progids = @()
+    $k = Get-Item "$fx\OpenWithList" -ErrorAction SilentlyContinue
+    if ($k) { $exes += $k.GetValueNames() | Where-Object { $_ -ne 'MRUList' } | ForEach-Object { $k.GetValue($_) } }
+    $k = Get-Item "$cr\$ext\OpenWithList" -ErrorAction SilentlyContinue
+    if ($k) { $exes += $k.GetSubKeyNames() }
+    foreach ($p in "$fx\OpenWithProgids", "$cr\$ext\OpenWithProgids") {
+        $k = Get-Item $p -ErrorAction SilentlyContinue
+        if ($k) { $progids += $k.GetValueNames() }
+    }
+    $progids += (Get-ItemProperty "$cr\$ext" -ErrorAction SilentlyContinue).'(default)'
+    $progids += (Get-ItemProperty "$fx\UserChoice" -ErrorAction SilentlyContinue).ProgId
+    $cmds = @()
+    foreach ($e in $exes) {
+        $c = (Get-ItemProperty "$cr\Applications\$e\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+        if (-not $c) {
+            $ap = (Get-ItemProperty "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$e" -ErrorAction SilentlyContinue).'(default)'
+            if ($ap) { $c = "`"$ap`" `"%1`"" }
+        }
+        if ($c) { $cmds += $c }
+    }
+    foreach ($p in $progids | Where-Object { $_ -and $_ -notlike 'AppX*' }) {
+        $c = (Get-ItemProperty "$cr\$p\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+        if ($c) { $cmds += $c }
+    }
+    $seen = @{}
+    foreach ($c in $cmds) {
+        $c = [Environment]::ExpandEnvironmentVariables($c)
+        if ($c -notmatch '%[1L]') { continue }                        # e.g. devenv /dde: no file slot
+        if ($c -notmatch '^\s*"?(.+?\.exe)"?\s*(.*)$') { continue }   # handles unquoted paths with spaces
+        $exe = $Matches[1]; $rest = $Matches[2]
+        $label = [IO.Path]::GetFileNameWithoutExtension($exe).ToLower()
+        if ($seen[$label] -or -not (Test-Path -LiteralPath $exe)) { continue }
+        $seen[$label] = 1
+        [pscustomobject]@{ Label = $label; Exe = $exe; Args = $rest }
+    }
+}
+
 # fo: fuzzy-pick a project, then a file inside it, then a program to open it with
 function fo {
     # stage 1: directory (same as work/gopro)
@@ -150,16 +196,27 @@ function fo {
     if (-not $file) { return }
     $path = Join-Path $dir $file
 
-    # stage 3: program.  Label -> scriptblock; $args[0] is the file path
-    $apps = [ordered]@{
-        'code'     = { code $args[0] }
-        'notepad'  = { notepad $args[0] }
-        'nvim'     = { nvim $args[0] }
-        'explorer' = { explorer.exe /select,$args[0] }
-        'default'  = { Start-Process $args[0] }   # whatever Windows associates
+    # stage 3: program.  Three sources, in this order:
+    #   hand table (only those installed)  ->  Windows "Open with" list for this
+    #   extension (see Get-OpenWith)  ->  explorer / default, which always apply
+    $hand = [ordered]@{
+        'code'    = { code $args[0] }
+        'nvim'    = { nvim $args[0] }
+        'notepad' = { notepad $args[0] }
     }
-    $app = $apps.Keys | fzf --prompt 'open with> ' --header $file
-    if ($app) { & $apps[$app] $path }
+    $apps = [ordered]@{}
+    foreach ($k in $hand.Keys) { if (Get-Command $k -ErrorAction SilentlyContinue) { $apps[$k] = $hand[$k] } }
+    $reg = @{}
+    foreach ($o in Get-OpenWith $path) {
+        if (-not $apps.Contains($o.Label)) { $reg[$o.Label] = $o; $apps[$o.Label] = $null }
+    }
+    $apps['explorer'] = { explorer.exe /select,$args[0] }
+    $apps['default']  = { Start-Process $args[0] }   # whatever Windows associates
+    $app = $apps.Keys | fzf --prompt 'open with> ' --header $file --height 80% `
+        --preview "type `"$path`"" --preview-window 'right,70%,wrap'
+    if (-not $app) { return }
+    if ($apps[$app]) { & $apps[$app] $path }
+    else { $o = $reg[$app]; Start-Process $o.Exe -ArgumentList ($o.Args -replace '"?%[1L]"?', "`"$path`"") }
 }
 
 # ccr: fuzzy-pick a past Claude Code session and resume it
@@ -378,6 +435,27 @@ function gohome {
     $pick = @('.') + (Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name) |
         fzf --prompt 'home> ' --preview "dir /b `"$root\{}`""
     if ($pick) { Set-Location (Join-Path $root $pick) }
+}
+
+# fcd: walk directories in fzf. Pick a folder to descend, '..' to go up,
+#      '.' to cd into the shown path. Esc aborts and leaves you where you were.
+function fcd {
+    $cur = (Get-Location).Path
+    while ($true) {
+        $parent  = Split-Path $cur -Parent            # '' at a drive root
+        $entries = @('.')
+        if ($parent) { $entries += '..' }
+        $entries += Get-ChildItem -LiteralPath $cur -Directory -Force |
+            Select-Object -ExpandProperty Name
+        $pick = $entries | fzf --prompt 'cd> ' --header $cur --no-sort `
+            --preview "dir /b `"$cur\{}`""
+        if (-not $pick) { return }                    # Esc or Ctrl-C: go nowhere
+        switch ($pick) {
+            '.'     { Set-Location -LiteralPath $cur; return }
+            '..'    { $cur = $parent }
+            default { $cur = Join-Path $cur $pick }
+        }
+    }
 }
 
 # --- Editing this file --------------------------------------------------------
