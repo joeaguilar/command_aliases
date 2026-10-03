@@ -2,6 +2,13 @@
 # Converted from command_aliases\aliases.cmd and command_aliases\bash_profile.sh
 # Reload with:  rel
 
+# --- Per-machine config -------------------------------------------------------
+# $ProjectsRoot: where projects live (proj, gopro, newpro, work, fo, fleet).
+#   To move it on one machine without editing this file:  setx AI_PROJECTS D:\path
+$ProjectsRoot = if ($env:AI_PROJECTS) { $env:AI_PROJECTS } else { "$env:USERPROFILE\AI\AI_projects" }
+# $AgentsTemplate: the AGENTS.md that newpro copies into a new project
+$AgentsTemplate = "$ProjectsRoot\command_aliases\templates\AGENTS.template.md"
+
 # --- Reload -----------------------------------------------------------------
 # Functions run in a child scope, so a plain ". $PROFILE" inside a function
 # would define everything locally and lose it on return. This re-sources the
@@ -37,7 +44,7 @@ function ....   { Set-Location ..\..\.. }
 function .....  { Set-Location ..\..\..\.. }
 # function gohome { Set-Location $env:USERPROFILE }
 function godown { Set-Location "$env:USERPROFILE\Downloads" }
-function proj   { Set-Location "$env:USERPROFILE\AI\AI_projects" }
+function proj   { Set-Location $ProjectsRoot }
 
 # --- Look ---------------------------------------------------------------------
 # ll: everything incl. hidden, oldest first (like ls -hAlTFtr)
@@ -107,10 +114,28 @@ if (Get-Command fzf -ErrorAction SilentlyContinue) {
 
 # gopro: pick a project under AI_projects in fzf, cd into it, show the itr briefing
 function gopro {
-    $root = "$env:USERPROFILE\AI\AI_projects"
+    $root = $ProjectsRoot
     $pick = Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name |
         fzf --prompt 'project> ' --preview "dir /b `"$root\{}`""
     if ($pick) { Set-Location (Join-Path $root $pick); brief }
+}
+
+# newpro <name>: create a project under $ProjectsRoot, cd into it, git init, then
+#   seed AGENTS.md from $AgentsTemplate and a CLAUDE.md that only imports it
+function newpro([string]$Name) {
+    if (-not $Name) { $Name = Read-Host 'project name' }
+    $Name = "$Name".Trim()
+    if (-not $Name) { return }
+    if ($Name.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) { Write-Warning "not a valid folder name: $Name"; return }
+    $dir = Join-Path $ProjectsRoot $Name
+    if (Test-Path -LiteralPath $dir) { Write-Warning "$dir already exists (gopro to jump there)"; return }
+    if (-not (Test-Path -LiteralPath $AgentsTemplate)) { Write-Warning "template not found: $AgentsTemplate"; return }
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    Set-Location -LiteralPath $dir
+    git init
+    Copy-Item -LiteralPath $AgentsTemplate AGENTS.md
+    # ascii: Windows PowerShell's utf8 writes a BOM ahead of the @import
+    Set-Content CLAUDE.md '@AGENTS.md' -Encoding ascii
 }
 
 # brief: itr summary for the current project, minus the long RECENT tail
@@ -124,7 +149,7 @@ function brief {
 # work: pick a project and open a Windows Terminal window on it:
 #       left pane runs claude, right pane is a plain shell
 function work {
-    $root = "$env:USERPROFILE\AI\AI_projects"
+    $root = $ProjectsRoot
     $pick = Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name |
         fzf --prompt 'work> ' --preview "dir /b `"$root\{}`""
     if (-not $pick) { return }
@@ -181,7 +206,7 @@ function Get-OpenWith([string]$Path) {
 # fo: fuzzy-pick a project, then a file inside it, then a program to open it with
 function fo {
     # stage 1: directory (same as work/gopro)
-    $root = "$env:USERPROFILE\AI\AI_projects"
+    $root = $ProjectsRoot
     $pick = Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name |
         fzf --prompt 'dir> ' --preview "dir /b `"$root\{}`""
     if (-not $pick) { return }
@@ -234,7 +259,7 @@ function ccr([switch]$All) {
 
 # fleet: one line per itr project: ready issues, in-progress, dirty files, unpushed commits
 function fleet {
-    $root = "$env:USERPROFILE\AI\AI_projects"
+    $root = $ProjectsRoot
     $fmt = '{0,-16} {1,6} {2,6} {3,6} {4,9}  {5}'
     $fmt -f 'PROJECT', 'READY', 'WIP', 'DIRTY', 'UNPUSHED', 'BRANCH'
     foreach ($d in Get-ChildItem $root -Directory | Where-Object { Test-Path "$($_.FullName)\.itr.db" }) {
