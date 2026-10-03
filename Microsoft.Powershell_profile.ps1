@@ -1,4 +1,4 @@
-﻿# PowerShell profile (PowerShell 5.1)
+# PowerShell profile (PowerShell 5.1)
 # Converted from command_aliases\aliases.cmd and command_aliases\bash_profile.sh
 # Reload with:  rel
 
@@ -203,6 +203,29 @@ function Get-OpenWith([string]$Path) {
     }
 }
 
+# fcd: walk directories in fzf. Pick a folder to descend, '..' to go up,
+#      '.' to cd into the shown path. Esc aborts and leaves you where you were.
+function fcd {
+    $cur = (Get-Location).Path
+    while ($true) {
+        $parent  = Split-Path $cur -Parent            # '' at a drive root
+        $entries = @('.')
+        if ($parent) { $entries += '..' }
+        $entries += Get-ChildItem -LiteralPath $cur -Directory -Force |
+            Select-Object -ExpandProperty Name
+
+        $pick = $entries | fzf --prompt 'cd> ' --header $cur --no-sort `
+            --preview "dir /b `"$cur\{}`""
+        if (-not $pick) { return }                    # Esc or Ctrl-C: go nowhere
+
+        switch ($pick) {
+            '.'     { Set-Location -LiteralPath $cur; return }
+            '..'    { $cur = $parent }
+            default { $cur = Join-Path $cur $pick }
+        }
+    }
+}
+
 # fo: fuzzy-pick a project, then a file inside it, then a program to open it with
 function fo {
     # stage 1: directory (same as work/gopro)
@@ -274,6 +297,121 @@ function fleet {
             $up = if ($upstream) { git rev-list --count '@{u}..HEAD' 2>$null } else { '-' }
             $fmt -f $d.Name, $ready, $wip, $dirty, $up, $branch
         } finally { Pop-Location }
+    }
+}
+
+# fleetup [-Update]: installed version of each fleet tool vs its latest GitHub release tag.
+# A stale binary can silently rewrite a project db into a shape the repo no longer accepts
+# (itr#264), so run this before `itr reindex` / `itr doctor --fix` on a project you have not
+# touched in a while. With -Update, stale tools are refreshed via their install.ps1.
+function fleetup([switch]$Update) {
+    $ErrorActionPreference = 'Continue'
+    $ProgressPreference = 'SilentlyContinue'
+    $tools = 'itr', 'gatr', 'kgr', 'ccq'
+    $fmt = '{0,-6} {1,-28} {2,-10} {3}'
+    $fmt -f 'TOOL', 'INSTALLED', 'LATEST', 'STATUS'
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $stale = @()
+    foreach ($t in $tools) {
+        $cmd = Get-Command $t -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        $raw = if ($cmd) { 'unknown' } else { '-' }
+        $have = $null
+        $versionExitCode = $null
+        $versionText = ''
+        $versionRaw = ''
+        if ($cmd) {
+            try {
+                # Capture stderr too, without inheriting a caller's Stop preference.
+                $versionOutput = @(& $cmd.Source --version 2>&1)
+                $versionExitCode = $LASTEXITCODE
+                $versionText = (($versionOutput | Where-Object { $_ -is [string] }) -join ' ').Trim()
+                $versionRaw = (($versionOutput | ForEach-Object { $_.ToString() }) -join ' ').Trim()
+                $versionPattern = '^(?:' + [regex]::Escape($t) + '\s+)?(v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$'
+                if ($versionExitCode -eq 0 -and $versionText -match $versionPattern) {
+                    $raw = $Matches[1]
+                    $core = ($raw -replace '^v', '') -replace '[-+].*$', ''
+                    $parsedVersion = $null
+                    if ([version]::TryParse($core, [ref]$parsedVersion)) { $have = $parsedVersion }
+                }
+            } catch {
+                $have = $null
+            }
+        }
+
+        $latest = 'unknown'
+        $want = $null
+        $lookupStatus = $null
+        try {
+            $release = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/joeaguilar/$t/releases/latest" -TimeoutSec 15 -ErrorAction Stop
+            $tag = [string]$release.tag_name
+            if ([string]::IsNullOrWhiteSpace($tag)) {
+                $lookupStatus = 'no release'
+            } else {
+                $tag = $tag.Trim()
+                $parsedVersion = $null
+                if ($tag -match '^v?[0-9]+\.[0-9]+\.[0-9]+$' -and
+                    [version]::TryParse(($tag -replace '^v', ''), [ref]$parsedVersion)) {
+                    $latest = $tag
+                    $want = $parsedVersion
+                } else {
+                    $lookupStatus = 'unknown release version'
+                }
+            }
+        } catch {
+            $lookupStatus = 'lookup failed'
+            if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+                $lookupStatus = 'no release'
+            } else {
+                $lookupStatus = 'lookup failed: ' + $_.Exception.Message
+            }
+        }
+        $status = if ($cmd -and $null -eq $have) { 'unknown' }
+                  elseif ($lookupStatus)        { $lookupStatus }
+                  elseif (-not $cmd)            { 'not installed' }
+                  elseif ($raw -match '[-+]')    {
+                      if ($have -lt $want) { 'dev build (behind {0})' -f $latest }
+                      else { 'dev build' }
+                  }
+                  elseif ($have -lt $want)      { 'STALE' }
+                  elseif ($have -gt $want)      { 'ahead' }
+                  else                          { 'ok' }
+        $fmt -f $t, $raw, $latest, $status
+        if ($status -eq 'unknown' -and $lookupStatus) {
+            Write-Host ("{0}: release {1}" -f $t, $lookupStatus) -ForegroundColor Yellow
+        } elseif ($status -eq 'unknown' -and $null -eq $lookupStatus) {
+            $sample = $versionRaw.Substring(0, [Math]::Min(60, $versionRaw.Length))
+            Write-Host ("{0}: version output not recognized (exit {1}): {2}" -f $t, $versionExitCode, $sample) -ForegroundColor Yellow
+        }
+        if ($status -eq 'STALE' -or ($status -eq 'not installed' -and $null -ne $want)) { $stale += $t }
+    }
+    if (-not $Update) {
+        if ($stale) { Write-Host "run 'fleetup -Update' to refresh: $($stale -join ', ')" -ForegroundColor Yellow }
+        return
+    }
+    foreach ($t in $stale) {
+        Write-Host "`n== updating $t" -ForegroundColor Cyan
+        $installerPath = $null
+        try {
+            $installerPath = Join-Path $env:TEMP ("install-$t-" + [guid]::NewGuid() + '.ps1')
+            Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/joeaguilar/$t/main/install.ps1" -OutFile $installerPath -TimeoutSec 60 -ErrorAction Stop
+            # Isolate installer exit statements so one failure cannot stop the fleet.
+            # gatr's installer has no -Update switch; itr/kgr/ccq accept it.
+            $installerArgs = @('-NoProfile', '-File', $installerPath)
+            if ($t -ne 'gatr') { $installerArgs += '-Update' }
+            $installerOutput = @(& (Join-Path $PSHOME 'powershell.exe') @installerArgs 2>&1)
+            $installerExitCode = $LASTEXITCODE
+            $installerOutput | ForEach-Object { Write-Host $_ }
+            if ($installerExitCode -ne 0) { throw "installer exited with code $installerExitCode" }
+        } catch {
+            Write-Host ("{0}: update failed: {1}" -f $t, $_.Exception.Message) -ForegroundColor Yellow
+        } finally {
+            if ($installerPath) { Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($stale) {
+        try { renv } catch { Write-Host 'PATH refresh failed' -ForegroundColor Yellow }
+        Write-Host ''
+        fleetup
     }
 }
 
@@ -460,27 +598,6 @@ function gohome {
     $pick = @('.') + (Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name) |
         fzf --prompt 'home> ' --preview "dir /b `"$root\{}`""
     if ($pick) { Set-Location (Join-Path $root $pick) }
-}
-
-# fcd: walk directories in fzf. Pick a folder to descend, '..' to go up,
-#      '.' to cd into the shown path. Esc aborts and leaves you where you were.
-function fcd {
-    $cur = (Get-Location).Path
-    while ($true) {
-        $parent  = Split-Path $cur -Parent            # '' at a drive root
-        $entries = @('.')
-        if ($parent) { $entries += '..' }
-        $entries += Get-ChildItem -LiteralPath $cur -Directory -Force |
-            Select-Object -ExpandProperty Name
-        $pick = $entries | fzf --prompt 'cd> ' --header $cur --no-sort `
-            --preview "dir /b `"$cur\{}`""
-        if (-not $pick) { return }                    # Esc or Ctrl-C: go nowhere
-        switch ($pick) {
-            '.'     { Set-Location -LiteralPath $cur; return }
-            '..'    { $cur = $parent }
-            default { $cur = Join-Path $cur $pick }
-        }
-    }
 }
 
 # --- Editing this file --------------------------------------------------------
