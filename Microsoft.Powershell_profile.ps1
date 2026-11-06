@@ -8,6 +8,10 @@
 $ProjectsRoot = if ($env:AI_PROJECTS) { $env:AI_PROJECTS } else { "$env:USERPROFILE\AI\AI_projects" }
 # $AgentsTemplate: the AGENTS.md that newpro copies into a new project
 $AgentsTemplate = "$ProjectsRoot\command_aliases\templates\AGENTS.template.md"
+# $ScreenshotsRoot: where screenshots are filed, as <yyyy>\<yyyy-MM>\ (cleandesktop).
+#   Greenshot saves into the same folders: OutputFilePath and
+#   OutputFileFilenamePattern in %APPDATA%\Greenshot\Greenshot.ini.
+$ScreenshotsRoot = Join-Path ([Environment]::GetFolderPath('MyPictures')) 'Screenshots'
 
 # --- Reload -----------------------------------------------------------------
 # Functions run in a child scope, so a plain ". $PROFILE" inside a function
@@ -598,6 +602,50 @@ function gohome {
     $pick = @('.') + (Get-ChildItem $root -Directory | Select-Object -ExpandProperty Name) |
         fzf --prompt 'home> ' --preview "dir /b `"$root\{}`""
     if ($pick) { Set-Location (Join-Path $root $pick) }
+}
+
+# --- Desktop cleanup ----------------------------------------------------------
+# cleandesktop [-Apply]: file the PNGs on the desktop under $ScreenshotsRoot.
+#   Greenshot names ("2026-11-06 02_37_58-Title.png") go to <yyyy>\<yyyy-MM>\,
+#   the folders Greenshot itself saves into; any other PNG goes to _unsorted.
+#   Dry run by default; -Apply moves them. Never overwrites: a name already
+#   taken gets " (2)", " (3)", ... before the extension.
+function cleandesktop([switch]$Apply, [string]$From = [Environment]::GetFolderPath('Desktop'), [string]$To = $ScreenshotsRoot) {
+    if (-not $To) { Write-Warning 'no destination: $ScreenshotsRoot is not set'; return }
+    # .NET resolves relative paths against the process directory, not $PWD
+    $To = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($To)
+    $plan = @(foreach ($f in Get-ChildItem -LiteralPath $From -File | Where-Object Extension -eq '.png') {
+        $t = [datetime]::MinValue
+        $stamped = $f.Name -match '^(\d{4}-\d{2}-\d{2} \d{2}_\d{2}_\d{2})-' -and
+            [datetime]::TryParseExact($Matches[1], 'yyyy-MM-dd HH_mm_ss', [cultureinfo]::InvariantCulture,
+                                      [Globalization.DateTimeStyles]::None, [ref]$t)
+        $sub = if ($stamped) { "$($f.Name.Substring(0, 4))\$($f.Name.Substring(0, 7))" } else { '_unsorted' }
+        [pscustomobject]@{ File = $f; Folder = $sub }
+    })
+    if (-not $plan) { "no PNGs on $From"; return }
+    $plan | Group-Object Folder | Sort-Object Name |
+        Format-Table @{ n = 'Folder'; e = { $_.Name } }, Count -AutoSize | Out-String | Write-Host
+    if (-not $Apply) { "dry run: $($plan.Count) PNGs would move to $To; re-run with -Apply"; return }
+    $moved = 0
+    foreach ($p in $plan) {
+        try {
+            $dir = Join-Path $To $p.Folder
+            [void][IO.Directory]::CreateDirectory($dir)
+            for ($n = 1; ; $n++) {
+                $name = if ($n -eq 1) { $p.File.Name } else { '{0} ({1}){2}' -f $p.File.BaseName, $n, $p.File.Extension }
+                $dest = Join-Path $dir $name
+                if (Test-Path -LiteralPath $dest) { continue }
+                # File.Move throws rather than overwrite; if the name was taken
+                # since the check above, try the next one
+                try { [IO.File]::Move($p.File.FullName, $dest); break }
+                catch { if (-not (Test-Path -LiteralPath $dest)) { throw } }
+            }
+            $moved++
+        } catch {
+            Write-Warning -WarningAction Continue "skipped $($p.File.Name): $($_.Exception.GetBaseException().Message)"
+        }
+    }
+    "moved $moved of $($plan.Count) PNGs to $To"
 }
 
 # --- Editing this file --------------------------------------------------------
