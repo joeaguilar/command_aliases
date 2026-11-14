@@ -1,0 +1,7 @@
+# Catalog manifest, read by ../_catalog/catalog.py. Draft: correct anything that is wrong.
+name = "command_aliases"
+title = "command_aliases"
+kind = "tool"
+stack = ["powershell", "shell"]
+status = "active"
+summary = "Shell profiles and command aliases for PowerShell, cmd and bash."
